@@ -1,4 +1,3 @@
-
 #pragma once
 
 #include <windows.h>
@@ -11,6 +10,9 @@ constexpr UINT WM_APP_VIDEO_ERROR = WM_APP + 2;
 
 void StartVideo(HWND window, const char* filePath);
 void StopVideo();
+void SeekVideo(double seconds);
+void ToggleVideoPause();
+bool IsVideoPaused();
 
 bool TakeLatestFrame(
     std::vector<uint8_t>& pixels,

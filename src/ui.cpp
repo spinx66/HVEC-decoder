@@ -1,9 +1,11 @@
-
 #include "ui.h"
+#include "timeline.h"
+#include "video.h"
 
 #include <d2d1.h>
 #include <dwrite.h>
 #include <dxgiformat.h>
+#include <algorithm>
 
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
@@ -17,11 +19,11 @@ static IDWriteTextFormat* textFormat = nullptr;
 static IDWriteTextFormat* centerTextFormat = nullptr;
 
 static ID2D1SolidColorBrush* backgroundBrush = nullptr;
-static ID2D1SolidColorBrush* panelBrush = nullptr;
+static ID2D1LinearGradientBrush* panelGradientBrush = nullptr;
 static ID2D1SolidColorBrush* textBrush = nullptr;
-static ID2D1SolidColorBrush* accentBrush = nullptr;
 
 static HWND mainWindow = nullptr;
+static bool controlsVisible = true;
 
 bool CreateUi(HWND window) {
     mainWindow = window;
@@ -78,14 +80,19 @@ bool CreateUi(HWND window) {
     RECT rect{};
     GetClientRect(window, &rect);
 
+    const UINT initialWidth = static_cast<UINT>(
+        std::max<LONG>(1, rect.right - rect.left)
+    );
+
+    const UINT initialHeight = static_cast<UINT>(
+        std::max<LONG>(1, rect.bottom - rect.top)
+    );
+
     hr = factory->CreateHwndRenderTarget(
         D2D1::RenderTargetProperties(),
         D2D1::HwndRenderTargetProperties(
             window,
-            D2D1::SizeU(
-                static_cast<UINT>(rect.right - rect.left),
-                static_cast<UINT>(rect.bottom - rect.top)
-            )
+            D2D1::SizeU(initialWidth, initialHeight)
         ),
         &target
     );
@@ -96,29 +103,58 @@ bool CreateUi(HWND window) {
             D2D1::ColorF(0.055f, 0.063f, 0.082f),
             &backgroundBrush)) ||
         FAILED(target->CreateSolidColorBrush(
-            D2D1::ColorF(0.10f, 0.115f, 0.145f),
-            &panelBrush)) ||
-        FAILED(target->CreateSolidColorBrush(
             D2D1::ColorF(0.91f, 0.93f, 0.97f),
-            &textBrush)) ||
-        FAILED(target->CreateSolidColorBrush(
-            D2D1::ColorF(0.52f, 0.62f, 1.0f),
-            &accentBrush))) {
+            &textBrush))) {
         return false;
     }
 
+    // Create 70% transparent black gradient for top panel
+    ID2D1GradientStopCollection* gradientStops = nullptr;
+    D2D1_GRADIENT_STOP stops[] = {
+        { 0.0f, D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.70f) },
+        { 1.0f, D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.40f) }
+    };
+
+    hr = target->CreateGradientStopCollection(
+        stops,
+        2,
+        &gradientStops
+    );
+
+    if (FAILED(hr)) return false;
+
+    hr = target->CreateLinearGradientBrush(
+        D2D1::LinearGradientBrushProperties(
+            D2D1::Point2F(0, 0),
+            D2D1::Point2F(0, 64)
+        ),
+        gradientStops,
+        &panelGradientBrush
+    );
+
+    gradientStops->Release();
+
+    if (FAILED(hr)) return false;
+
+    if (!TimelineInitialize(target, textFactory)) {
+        return false;
+    }
+
+    controlsVisible = true;
     return true;
 }
 
 void ResizeUi(UINT width, UINT height) {
-    if (target && width > 0 && height > 0) {
-        HRESULT hr = target->Resize(
-            D2D1::SizeU(width, height)
-        );
+    if (!target || width == 0 || height == 0) {
+        return;
+    }
 
-        if (SUCCEEDED(hr) && mainWindow) {
-            InvalidateRect(mainWindow, nullptr, FALSE);
-        }
+    const HRESULT hr = target->Resize(
+        D2D1::SizeU(width, height)
+    );
+
+    if (SUCCEEDED(hr) && mainWindow) {
+        InvalidateRect(mainWindow, nullptr, FALSE);
     }
 }
 
@@ -128,7 +164,10 @@ void ClearVideoFrame() {
         videoBitmap = nullptr;
     }
 
+    controlsVisible = true;
+
     if (mainWindow) {
+        KillTimer(mainWindow, UI_CONTROLS_TIMER_ID);
         InvalidateRect(mainWindow, nullptr, FALSE);
     }
 }
@@ -140,9 +179,14 @@ bool SetVideoFrame(
     UINT stride
 ) {
     if (!target || !pixels ||
-        width == 0 || height == 0 || stride < width * 4ULL) {
+        width == 0 ||
+        height == 0 ||
+        static_cast<unsigned long long>(stride) <
+            static_cast<unsigned long long>(width) * 4ULL) {
         return false;
     }
+
+    const bool firstFrame = (videoBitmap == nullptr);
 
     const D2D1_BITMAP_PROPERTIES properties =
         D2D1::BitmapProperties(
@@ -170,7 +214,7 @@ bool SetVideoFrame(
 
     ID2D1Bitmap* newBitmap = nullptr;
 
-    HRESULT hr = target->CreateBitmap(
+    const HRESULT hr = target->CreateBitmap(
         D2D1::SizeU(width, height),
         pixels,
         stride,
@@ -187,15 +231,105 @@ bool SetVideoFrame(
     }
 
     videoBitmap = newBitmap;
+
+    if (firstFrame && mainWindow) {
+        controlsVisible = true;
+
+        SetTimer(
+            mainWindow,
+            UI_CONTROLS_TIMER_ID,
+            2200,
+            nullptr
+        );
+
+        InvalidateRect(mainWindow, nullptr, FALSE);
+    }
+
     return true;
+}
+
+void UiMouseMoved(HWND window) {
+    if (!videoBitmap) {
+        if (!controlsVisible) {
+            controlsVisible = true;
+            InvalidateRect(window, nullptr, FALSE);
+        }
+
+        KillTimer(window, UI_CONTROLS_TIMER_ID);
+        return;
+    }
+
+    if (!controlsVisible) {
+        controlsVisible = true;
+        InvalidateRect(window, nullptr, FALSE);
+    }
+
+    SetTimer(
+        window,
+        UI_CONTROLS_TIMER_ID,
+        2200,
+        nullptr
+    );
+}
+
+void UiControlsTimer(HWND window) {
+    if (!videoBitmap) {
+        KillTimer(window, UI_CONTROLS_TIMER_ID);
+        controlsVisible = true;
+        return;
+    }
+
+    POINT cursor{};
+
+    if (GetCursorPos(&cursor)) {
+        ScreenToClient(window, &cursor);
+
+        RECT rect{};
+        GetClientRect(window, &rect);
+
+        const bool insideWindow =
+            cursor.x >= 0 &&
+            cursor.x < rect.right &&
+            cursor.y >= 0 &&
+            cursor.y < rect.bottom;
+
+        const bool overTopControls =
+            cursor.y >= 0 && cursor.y < 64;
+
+        const bool overTimeline =
+            cursor.y >= rect.bottom - 90 && cursor.y <= rect.bottom;
+
+        if (insideWindow && (overTopControls || overTimeline || TimelineIsDragging() || IsVideoPaused())) {
+            SetTimer(
+                window,
+                UI_CONTROLS_TIMER_ID,
+                600,
+                nullptr
+            );
+
+            return;
+        }
+    }
+
+    KillTimer(window, UI_CONTROLS_TIMER_ID);
+
+    if (controlsVisible && !TimelineIsDragging() && !IsVideoPaused()) {
+        controlsVisible = false;
+        InvalidateRect(window, nullptr, FALSE);
+    }
 }
 
 void DrawUi() {
     if (!target) return;
 
     const D2D1_SIZE_F size = target->GetSize();
+
     const float width = size.width;
     const float height = size.height;
+
+    if (width <= 0.0f || height <= 0.0f) {
+        return;
+    }
 
     target->BeginDraw();
 
@@ -203,29 +337,17 @@ void DrawUi() {
         D2D1::ColorF(0.055f, 0.063f, 0.082f)
     );
 
-    // Top bar.
+    const D2D1_RECT_F videoRect =
+        D2D1::RectF(0, 0, width, height);
+
     target->FillRectangle(
-        D2D1::RectF(0, 0, width, 64),
-        panelBrush
+        videoRect,
+        backgroundBrush
     );
-
-    target->DrawText(
-        L"SPINX PLAYER",
-        12,
-        textFormat,
-        D2D1::RectF(24, 18, 260, 48),
-        textBrush
-    );
-
-    // Video surface.
-    const D2D1_RECT_F videoRect = D2D1::RectF(
-        24, 84, width - 24, height - 100
-    );
-
-    target->FillRectangle(videoRect, backgroundBrush);
 
     if (videoBitmap) {
-        const D2D1_SIZE_F imageSize = videoBitmap->GetSize();
+        const D2D1_SIZE_F imageSize =
+            videoBitmap->GetSize();
 
         const float availableWidth =
             videoRect.right - videoRect.left;
@@ -233,25 +355,34 @@ void DrawUi() {
         const float availableHeight =
             videoRect.bottom - videoRect.top;
 
-        const float scaleX = availableWidth / imageSize.width;
-        const float scaleY = availableHeight / imageSize.height;
-        const float scale = (scaleX < scaleY) ? scaleX : scaleY;
+        const float scaleX =
+            availableWidth / imageSize.width;
 
-        const float drawWidth = imageSize.width * scale;
-        const float drawHeight = imageSize.height * scale;
+        const float scaleY =
+            availableHeight / imageSize.height;
+
+        const float scale =
+            (scaleX < scaleY) ? scaleX : scaleY;
+
+        const float drawWidth =
+            imageSize.width * scale;
+
+        const float drawHeight =
+            imageSize.height * scale;
 
         const float left =
-            videoRect.left + (availableWidth - drawWidth) / 2.0f;
+            (availableWidth - drawWidth) / 2.0f;
 
         const float top =
-            videoRect.top + (availableHeight - drawHeight) / 2.0f;
+            (availableHeight - drawHeight) / 2.0f;
 
-        const D2D1_RECT_F destination = D2D1::RectF(
-            left,
-            top,
-            left + drawWidth,
-            top + drawHeight
-        );
+        const D2D1_RECT_F destination =
+            D2D1::RectF(
+                left,
+                top,
+                left + drawWidth,
+                top + drawHeight
+            );
 
         target->DrawBitmap(
             videoBitmap,
@@ -271,105 +402,43 @@ void DrawUi() {
         );
     }
 
-    // Bottom controls.
-    target->FillRectangle(
-        D2D1::RectF(0, height - 76, width, height),
-        panelBrush
-    );
+    const bool showControls = controlsVisible || TimelineIsDragging() || IsVideoPaused();
 
-    // Timeline.
-    const float timelineY = height - 54;
+    if (showControls) {
+        target->FillRectangle(
+            D2D1::RectF(0, 0, width, 64),
+            panelGradientBrush
+        );
 
-    target->FillRoundedRectangle(
-        D2D1::RoundedRect(
-            D2D1::RectF(
-                24, timelineY,
-                width - 24, timelineY + 4
-            ),
-            2, 2
-        ),
-        panelBrush
-    );
-
-    target->FillRoundedRectangle(
-        D2D1::RoundedRect(
-            D2D1::RectF(
-                24, timelineY,
-                24 + (width - 48) * 0.28f,
-                timelineY + 4
-            ),
-            2, 2
-        ),
-        accentBrush
-    );
-
-    // Placeholder time labels.
-    target->DrawText(
-        L"00:00",
-        5,
-        textFormat,
-        D2D1::RectF(
-            24, height - 39,
-            100, height - 12
-        ),
-        textBrush
-    );
-
-    target->DrawText(
-        L"00:00",
-        5,
-        textFormat,
-        D2D1::RectF(
-            width - 100, height - 39,
-            width - 24, height - 12
-        ),
-        textBrush
-    );
-
-    // Play triangle.
-    ID2D1PathGeometry* geometry = nullptr;
-    ID2D1GeometrySink* sink = nullptr;
-
-    if (factory &&
-        SUCCEEDED(factory->CreatePathGeometry(&geometry))) {
-
-        if (SUCCEEDED(geometry->Open(&sink))) {
-            sink->BeginFigure(
-                D2D1::Point2F(width / 2 - 6, height - 38),
-                D2D1_FIGURE_BEGIN_FILLED
-            );
-
-            sink->AddLine(
-                D2D1::Point2F(width / 2 - 6, height - 18)
-            );
-
-            sink->AddLine(
-                D2D1::Point2F(width / 2 + 10, height - 28)
-            );
-
-            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
-            sink->Close();
-
-            target->FillGeometry(geometry, textBrush);
-            sink->Release();
-        }
-
-        geometry->Release();
+        target->DrawText(
+            L"SPINX PLAYER",
+            12,
+            textFormat,
+            D2D1::RectF(24, 18, 260, 48),
+            textBrush
+        );
     }
 
-    HRESULT hr = target->EndDraw();
+    TimelineDraw(target, width, height, showControls, IsVideoPaused());
+
+    const HRESULT hr = target->EndDraw();
 
     if (hr == D2DERR_RECREATE_TARGET) {
-        // Full Direct2D device-loss recovery is a later improvement.
+        // Device loss recovery
     }
 }
 
 void CleanupUi() {
+    if (mainWindow) {
+        KillTimer(mainWindow, UI_CONTROLS_TIMER_ID);
+    }
+
+    TimelineCleanup();
+
     if (videoBitmap) videoBitmap->Release();
 
-    if (accentBrush) accentBrush->Release();
     if (textBrush) textBrush->Release();
-    if (panelBrush) panelBrush->Release();
+    if (panelGradientBrush) panelGradientBrush->Release();
     if (backgroundBrush) backgroundBrush->Release();
 
     if (target) target->Release();
@@ -381,19 +450,14 @@ void CleanupUi() {
     if (factory) factory->Release();
 
     videoBitmap = nullptr;
-
-    accentBrush = nullptr;
     textBrush = nullptr;
-    panelBrush = nullptr;
+    panelGradientBrush = nullptr;
     backgroundBrush = nullptr;
-
     target = nullptr;
-
     centerTextFormat = nullptr;
     textFormat = nullptr;
-
     textFactory = nullptr;
     factory = nullptr;
-
     mainWindow = nullptr;
+    controlsVisible = true;
 }

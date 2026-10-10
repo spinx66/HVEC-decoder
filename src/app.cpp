@@ -1,14 +1,16 @@
-
 #include <windows.h>
+#include <windowsx.h>
 #include <shellapi.h>
 
 #include <cstring>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 #include "theme.h"
 #include "ui.h"
 #include "video.h"
+#include "timeline.h"
 
 Theme theme;
 
@@ -125,6 +127,116 @@ LRESULT CALLBACK WindowProc(
             return 0;
         }
 
+        case WM_MOUSEMOVE: {
+            UiMouseMoved(window);
+
+            const float x = static_cast<float>(
+                GET_X_LPARAM(lParam)
+            );
+
+            const float y = static_cast<float>(
+                GET_Y_LPARAM(lParam)
+            );
+
+            RECT rect{};
+            GetClientRect(window, &rect);
+
+            if (TimelineMouseMove(
+                    x, y,
+                    static_cast<float>(rect.right),
+                    static_cast<float>(rect.bottom))) {
+                InvalidateRect(window, nullptr, FALSE);
+            }
+
+            return 0;
+        }
+
+        case WM_LBUTTONDOWN: {
+            const float x = static_cast<float>(
+                GET_X_LPARAM(lParam)
+            );
+
+            const float y = static_cast<float>(
+                GET_Y_LPARAM(lParam)
+            );
+
+            RECT rect{};
+            GetClientRect(window, &rect);
+
+            if (TimelineHitPlayPause(x, y, static_cast<float>(rect.right), static_cast<float>(rect.bottom))) {
+                ToggleVideoPause();
+                InvalidateRect(window, nullptr, FALSE);
+                return 0;
+            }
+
+            if (TimelineMouseDown(
+                    x, y,
+                    static_cast<float>(rect.right),
+                    static_cast<float>(rect.bottom))) {
+                SetFocus(window);
+                InvalidateRect(window, nullptr, FALSE);
+                return 0;
+            }
+
+            break;
+        }
+
+        case WM_LBUTTONUP: {
+            const float x = static_cast<float>(
+                GET_X_LPARAM(lParam)
+            );
+
+            const float y = static_cast<float>(
+                GET_Y_LPARAM(lParam)
+            );
+
+            RECT rect{};
+            GetClientRect(window, &rect);
+
+            if (TimelineMouseUp(
+                    x, y,
+                    static_cast<float>(rect.right),
+                    static_cast<float>(rect.bottom))) {
+
+                double targetSeconds = 0.0;
+
+                if (TimelineTakeSeekRequest(targetSeconds)) {
+                    SeekVideo(targetSeconds);
+                }
+
+                InvalidateRect(window, nullptr, FALSE);
+                return 0;
+            }
+
+            break;
+        }
+
+        case WM_KEYDOWN: {
+            if (wParam == VK_LEFT) {
+                double target = std::max(0.0, TimelineGetPosition() - 30.0);
+                SeekVideo(target);
+                InvalidateRect(window, nullptr, FALSE);
+                return 0;
+            } else if (wParam == VK_RIGHT) {
+                double target = std::min(TimelineGetDuration(), TimelineGetPosition() + 30.0);
+                SeekVideo(target);
+                InvalidateRect(window, nullptr, FALSE);
+                return 0;
+            } else if (wParam == VK_SPACE) {
+                ToggleVideoPause();
+                InvalidateRect(window, nullptr, FALSE);
+                return 0;
+            }
+            break;
+        }
+
+        case WM_TIMER:
+            if (wParam == UI_CONTROLS_TIMER_ID) {
+                UiControlsTimer(window);
+                return 0;
+            }
+            break;
+
         case WM_APP_VIDEO_ERROR: {
             char error[1024]{};
             GetVideoError(error, sizeof(error));
@@ -156,8 +268,6 @@ int WINAPI WinMain(
     LPSTR,
     int show
 ) {
-    // Resolve theme.ini relative to the executable.
-    // build\spinx_player.exe -> ..\theme.ini
     char exePath[MAX_PATH]{};
 
     const DWORD pathLength = GetModuleFileNameA(
@@ -188,7 +298,7 @@ int WINAPI WinMain(
 
     *(lastSlash + 1) = '\0';
 
-    if (strlen(exePath) + strlen("..\\theme.ini") >= MAX_PATH) {
+    if (strlen(exePath) + strlen("theme.ini") >= MAX_PATH) {
         MessageBoxA(
             nullptr,
             "The theme path is too long.",
@@ -198,7 +308,7 @@ int WINAPI WinMain(
         return 1;
     }
 
-    strcat_s(exePath, MAX_PATH, "..\\theme.ini");
+    strcat_s(exePath, MAX_PATH, "theme.ini");
 
     if (!LoadTheme(exePath, theme)) {
         MessageBoxA(
@@ -281,7 +391,6 @@ int WINAPI WinMain(
         DispatchMessageA(&message);
     }
 
-    // Safe to call again if WM_DESTROY already stopped playback.
     StopVideo();
     CleanupUi();
 
